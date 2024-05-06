@@ -1,9 +1,9 @@
 #!/bin/bash -e
 
 apt-get update && apt-get -y install git git-lfs
-git clone --depth=1 -b cuda12.2 https://github.com/makaveli10/TensorRT-LLM.git
+git clone --depth=1 -b cuda12.2 https://github.com/z-zawhtet-a/TensorRT-LLM.git
 cd TensorRT-LLM
-git checkout main
+# git checkout main
 git submodule update --init --recursive
 git lfs install
 git lfs pull
