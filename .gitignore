@@ -1,3 +1,4 @@
 *.pt
 .DS_Store
 __pycache__/
+docker/scratch-space
