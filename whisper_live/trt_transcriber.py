@@ -184,7 +184,7 @@ class WhisperTRTLLM(object):
         #     task="transcribe",
         # )
         self.tokenizer = get_tokenizer(
-            tokenizer_dir=engine_dir,
+            tokenizer_dir=assets_dir,
         )
         self.filters = mel_filters(self.device, self.encoder.n_mels, assets_dir)
 
