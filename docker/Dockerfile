@@ -23,5 +23,5 @@ FROM devel as release
 WORKDIR /root/
 COPY scripts/install-trt-llm.sh /root
 RUN bash install-trt-llm.sh && rm install-trt-llm.sh
-COPY scripts/setup-whisperfusion.sh /root/
-RUN ./setup-whisperfusion.sh
+COPY scripts/setup-realtime-whisper.sh /root/
+RUN ./setup-realtime-whisper.sh

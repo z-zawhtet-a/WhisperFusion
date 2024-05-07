@@ -1,13 +1,13 @@
 version: '3.8'
 
 services:
-  whisperfusion:
+  realtime-whisper:
     build:
       context: docker
       dockerfile: Dockerfile
       args:
         CUDA_ARCH: ${CUDA_ARCH:-89-real;90-real}
-    image: whisperfusion:latest
+    image: realtime-whisper:latest
     volumes:
       - type: bind
         source: ./docker/scratch-space
@@ -15,14 +15,13 @@ services:
     environment:
       VERBOSE: ${VERBOSE:-false}
     ports:
-      - "8888:8888"
-      - "6006:6006"
+      - "8080:8080"
     deploy:
       resources:
         reservations:
           devices:
             - capabilities: ["gpu"]
-    entrypoint: ["/root/scratch-space/run-whisperfusion.sh"]
+    entrypoint: ["/root/scratch-space/run-realtime-whisper.sh"]
 
   nginx:
     image: nginx:latest
@@ -34,5 +33,5 @@ services:
     ports:
       - "8000:80"
     depends_on:
-      - whisperfusion
+      - realtime-whisper
     entrypoint: ["/bin/bash", "/start-nginx.sh"]

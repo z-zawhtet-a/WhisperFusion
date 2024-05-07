@@ -1,32 +1,30 @@
-import websockets
-import time
-import threading
 import json
-import textwrap
-
 import logging
-logging.basicConfig(level = logging.INFO)
+import threading
+import time
 
-from websockets.sync.server import serve
+import websockets
 
-import torch
-import numpy as np
-import queue
+logging.basicConfig(level=logging.INFO)
 
-from whisper_live.vad import VoiceActivityDetection
-from whisper_live.trt_transcriber import WhisperTRTLLM
-
-
-from scipy.io.wavfile import write
 import functools
 
+import numpy as np
+import torch
+from scipy.io.wavfile import write
+from websockets.sync.server import serve
+
+from whisper_live.trt_transcriber import WhisperTRTLLM
+from whisper_live.vad import VoiceActivityDetection
+
 save_counter = 0
+
+
 def save_wav(normalized_float32):
     global save_counter
     scaled_int16 = (normalized_float32 * 32768).astype(np.int16)
     write(f"outputs/output{save_counter}.wav", 16000, scaled_int16)
     save_counter += 1
-
 
 
 class TranscriptionServer:
@@ -48,7 +46,7 @@ class TranscriptionServer:
 
     def __init__(self):
         # voice activity detection model
-        
+
         self.clients = {}
         self.websockets = {}
         self.clients_start_time = {}
@@ -73,10 +71,16 @@ class TranscriptionServer:
 
         return wait_time / 60
 
-    def recv_audio(self, websocket, transcription_queue=None, llm_queue=None, whisper_tensorrt_path=None, should_send_server_ready=None):
+    def recv_audio(
+        self,
+        websocket,
+        transcription_queue=None,
+        whisper_tensorrt_path=None,
+        should_send_server_ready=None,
+    ):
         """
         Receive audio chunks from a client in an infinite loop.
-        
+
         Continuously receives audio frames from a connected client
         over a WebSocket connection. It processes the audio frames using a
         voice activity detection (VAD) model to determine if they contain speech
@@ -90,7 +94,7 @@ class TranscriptionServer:
 
         Args:
             websocket (WebSocket): The WebSocket connection for the client.
-        
+
         Raises:
             Exception: If there is an error during the audio frame processing.
         """
@@ -113,9 +117,11 @@ class TranscriptionServer:
             websocket.close()
             del websocket
             return
-        
+
         if self.transcriber is None:
-            self.transcriber = WhisperTRTLLM(whisper_tensorrt_path, assets_dir="assets", device="cuda")
+            self.transcriber = WhisperTRTLLM(
+                whisper_tensorrt_path, assets_dir="assets", device="cuda"
+            )
 
         client = ServeClient(
             websocket,
@@ -124,7 +130,6 @@ class TranscriptionServer:
             task=options["task"],
             client_uid=options["uid"],
             transcription_queue=transcription_queue,
-            llm_queue=llm_queue,
             transcriber=self.transcriber,
         )
 
@@ -139,13 +144,17 @@ class TranscriptionServer:
 
                 # VAD
                 try:
-                    speech_prob = self.vad_model(torch.from_numpy(frame_np.copy()), self.RATE).item()
+                    speech_prob = self.vad_model(
+                        torch.from_numpy(frame_np.copy()), self.RATE
+                    ).item()
                     if speech_prob < self.vad_threshold:
                         no_voice_activity_chunks += 1
                         if no_voice_activity_chunks > 3:
                             if not self.clients[websocket].eos:
                                 self.clients[websocket].set_eos(True)
-                            time.sleep(0.1)    # EOS stop receiving frames for a 100ms(to send output to LLM.)
+                            time.sleep(
+                                0.1
+                            )  # EOS stop receiving frames for a 100ms(to send output to LLM.)
                         continue
                     no_voice_activity_chunks = 0
                     self.clients[websocket].set_eos(False)
@@ -158,7 +167,9 @@ class TranscriptionServer:
                 elapsed_time = time.time() - self.clients_start_time[websocket]
                 if elapsed_time >= self.max_connection_time:
                     self.clients[websocket].disconnect()
-                    logging.warning(f"{self.clients[websocket]} Client disconnected due to overtime.")
+                    logging.warning(
+                        f"{self.clients[websocket]} Client disconnected due to overtime."
+                    )
                     self.clients[websocket].cleanup()
                     self.clients.pop(websocket)
                     self.clients_start_time.pop(websocket)
@@ -175,7 +186,14 @@ class TranscriptionServer:
                 del websocket
                 break
 
-    def run(self, host, port=9090, transcription_queue=None, llm_queue=None, whisper_tensorrt_path=None, should_send_server_ready=None):
+    def run(
+        self,
+        host,
+        port=9090,
+        transcription_queue=None,
+        whisper_tensorrt_path=None,
+        should_send_server_ready=None,
+    ):
         """
         Run the transcription server.
 
@@ -184,19 +202,20 @@ class TranscriptionServer:
             port (int): The port number to bind the server.
         """
         # wait for WhisperSpeech to warmup
-        while not should_send_server_ready.value:
-            time.sleep(0.5)
-        
+        # while not should_send_server_ready.value:
+        #     time.sleep(0.5)
+
+        print(f"Starting server at {host}:{port}")
+
         with serve(
             functools.partial(
                 self.recv_audio,
                 transcription_queue=transcription_queue,
-                llm_queue=llm_queue,
                 whisper_tensorrt_path=whisper_tensorrt_path,
                 should_send_server_ready=should_send_server_ready,
             ),
             host,
-            port
+            port,
         ) as server:
             server.serve_forever()
 
@@ -220,6 +239,7 @@ class ServeClient:
         transcript (list): List of transcribed segments.
         websocket: The WebSocket connection for the client.
     """
+
     RATE = 16000
     SERVER_READY = "SERVER_READY"
     DISCONNECT = "DISCONNECT"
@@ -229,13 +249,12 @@ class ServeClient:
         websocket,
         task="transcribe",
         device=None,
-        multilingual=False,
-        language=None, 
+        multilingual=True,
+        language=None,
         client_uid=None,
         transcription_queue=None,
-        llm_queue=None,
         transcriber=None,
-        ):
+    ):
         """
         Initialize a ServeClient instance.
         The Whisper model is initialized based on the client's language and device availability.
@@ -256,7 +275,6 @@ class ServeClient:
         self.transcriber = transcriber
         self.client_uid = client_uid
         self.transcription_queue = transcription_queue
-        self.llm_queue = llm_queue
         self.data = b""
         self.frames = b""
         self.task = task
@@ -276,21 +294,16 @@ class ServeClient:
         self.eos = False
         self.trans_thread = threading.Thread(target=self.speech_to_text)
         self.trans_thread.start()
-        
+
         self.websocket.send(
-            json.dumps(
-                {
-                    "uid": self.client_uid,
-                    "message": self.SERVER_READY
-                }
-            )
+            json.dumps({"uid": self.client_uid, "message": self.SERVER_READY})
         )
-    
+
     def set_eos(self, eos):
         self.lock.acquire()
         self.eos = eos
         self.lock.release()
-    
+
     def add_frames(self, frame_np):
         """
         Add audio frames to the ongoing audio stream buffer.
@@ -308,9 +321,9 @@ class ServeClient:
 
         """
         self.lock.acquire()
-        if self.frames_np is not None and self.frames_np.shape[0] > 45*self.RATE:
+        if self.frames_np is not None and self.frames_np.shape[0] > 45 * self.RATE:
             self.frames_offset += 30.0
-            self.frames_np = self.frames_np[int(30*self.RATE):]
+            self.frames_np = self.frames_np[int(30 * self.RATE) :]
         if self.frames_np is None:
             self.frames_np = frame_np.copy()
         else:
@@ -326,8 +339,8 @@ class ServeClient:
 
         If the client's language is not detected, it waits for 30 seconds of audio input to make a language prediction.
         It utilizes the Whisper ASR model to transcribe the audio, continuously processing and streaming results. Segments
-        are sent to the client in real-time, and a history of segments is maintained to provide context.Pauses in speech 
-        (no output from Whisper) are handled by showing the previous output for a set duration. A blank segment is added if 
+        are sent to the client in real-time, and a history of segments is maintained to provide context.Pauses in speech
+        (no output from Whisper) are handled by showing the previous output for a set duration. A blank segment is added if
         there is no speech for a specified duration to indicate a pause.
 
         Raises:
@@ -335,39 +348,34 @@ class ServeClient:
 
         """
         while True:
-            # send the LLM outputs
-            try:
-                llm_response = None
-                if self.llm_queue is not None:
-                    while not self.llm_queue.empty():
-                        llm_response = self.llm_queue.get()
-                    
-                    if llm_response:
-                        eos = llm_response["eos"]
-                        if eos:
-                            self.websocket.send(json.dumps(llm_response))
-            except queue.Empty:
-                pass
-            
             if self.exit:
                 logging.info("[Whisper INFO:] Exiting speech to text thread")
                 break
-            
+
             if self.frames_np is None:
-                time.sleep(0.02)    # wait for any audio to arrive
+                time.sleep(0.02)  # wait for any audio to arrive
                 continue
 
             # clip audio if the current chunk exceeds 30 seconds, this basically implies that
             # no valid segment for the last 30 seconds from whisper
-            if self.frames_np[int((self.timestamp_offset - self.frames_offset)*self.RATE):].shape[0] > 25 * self.RATE:
+            if (
+                self.frames_np[
+                    int((self.timestamp_offset - self.frames_offset) * self.RATE) :
+                ].shape[0]
+                > 25 * self.RATE
+            ):
                 duration = self.frames_np.shape[0] / self.RATE
                 self.timestamp_offset = self.frames_offset + duration - 5
-    
-            samples_take = max(0, (self.timestamp_offset - self.frames_offset)*self.RATE)
-            input_bytes = self.frames_np[int(samples_take):].copy()
+
+            samples_take = max(
+                0, (self.timestamp_offset - self.frames_offset) * self.RATE
+            )
+            input_bytes = self.frames_np[int(samples_take) :].copy()
             duration = input_bytes.shape[0] / self.RATE
-            if duration<0.4:
-                time.sleep(0.01)    # 5ms sleep to wait for some voice active audio to arrive
+            if duration < 0.4:
+                time.sleep(
+                    0.01
+                )  # 5ms sleep to wait for some voice active audio to arrive
                 continue
 
             try:
@@ -382,33 +390,42 @@ class ServeClient:
                 if len(last_segment):
                     segments.append({"text": last_segment})
                     try:
-                        self.prompt = ' '.join(segment['text'] for segment in segments)
+                        self.prompt = " ".join(segment["text"] for segment in segments)
                         if self.last_prompt != self.prompt:
                             self.websocket.send(
-                                json.dumps({
-                                    "uid": self.client_uid,
-                                    "segments": segments,
-                                    "eos": self.eos,
-                                    "latency": infer_time
-                                })
+                                json.dumps(
+                                    {
+                                        "uid": self.client_uid,
+                                        "segments": segments,
+                                        "eos": self.eos,
+                                        "latency": infer_time,
+                                    }
+                                )
                             )
-                            
-                        self.transcription_queue.put({"uid": self.client_uid, "prompt": self.prompt, "eos": self.eos})
+
+                        self.transcription_queue.put(
+                            {
+                                "uid": self.client_uid,
+                                "prompt": self.prompt,
+                                "eos": self.eos,
+                            }
+                        )
                         if self.eos:
                             self.timestamp_offset += duration
-                            logging.info(f"[Whisper INFO]: {self.prompt}, eos: {self.eos}")
                             logging.info(
-                                f"[Whisper INFO]: Average inference time {sum(self.segment_inference_time) / len(self.segment_inference_time)}\n\n")
+                                f"[Whisper INFO]: {self.prompt}, eos: {self.eos}"
+                            )
+                            logging.info(
+                                f"[Whisper INFO]: Average inference time {sum(self.segment_inference_time) / len(self.segment_inference_time)}\n\n"
+                            )
                             self.segment_inference_time = []
-                        
-                            
-                            
+
                     except Exception as e:
                         logging.error(f"[ERROR]: {e}")
 
             except Exception as e:
                 logging.error(f"[ERROR]: {e}")
-    
+
     def disconnect(self):
         """
         Notify the client of disconnection and send a disconnect message.
@@ -418,14 +435,9 @@ class ServeClient:
 
         """
         self.websocket.send(
-            json.dumps(
-                {
-                    "uid": self.client_uid,
-                    "message": self.DISCONNECT
-                }
-            )
+            json.dumps({"uid": self.client_uid, "message": self.DISCONNECT})
         )
-    
+
     def cleanup(self):
         """
         Perform cleanup tasks before exiting the transcription service.
