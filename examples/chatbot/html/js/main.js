@@ -1,4 +1,4 @@
-let websocket_uri = 'ws://' + window.location.host + '/transcription';
+let websocket_uri = 'wss://' + window.location.host + '/transcription';
 // let websocket_audio_uri = 'ws://' + window.location.host + '/audio';
 
 // let websocket_uri = "ws://" + "localhost:8080";
@@ -160,6 +160,7 @@ function initWebSocket() {
           "<p>" + data["segments"][0].text + "</p>",
           "transcription-" + available_transcription_elements
         );
+        new_transcription_time_element(data["latency"])
         new_transcription_element_state = false;
       }
       document.getElementById(
