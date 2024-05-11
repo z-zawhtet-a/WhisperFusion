@@ -6,7 +6,7 @@ services:
       context: docker
       dockerfile: Dockerfile
       args:
-        CUDA_ARCH: ${CUDA_ARCH:-89-real;90-real}
+        CUDA_ARCH: ${CUDA_ARCH:-75-real;86-real;89-real;90-real}
     image: realtime-whisper:latest
     volumes:
       - type: bind
