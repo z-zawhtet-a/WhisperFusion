@@ -1,10 +1,11 @@
 websockets
 onnxruntime==1.17.3
 onnxruntime-gpu --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+tokenizers
+numba
+kaldialign
+soundfile
 ffmpeg-python
 scipy
-websocket-client
-kaldialign
-braceexpand
-openai-whisper
-soundfile
+jiwer
+evaluate

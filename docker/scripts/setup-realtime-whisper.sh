@@ -1,7 +1,7 @@
 #!/bin/bash -e
 
 ## Clone this repo and install requirements
-[ -d "RealtimeWhisper" ] || git clone -b asr https://github.com/z-zawhtet-a/WhisperFusion.git RealtimeWhisper
+[ -d "RealtimeWhisper" ] || git clone -b asr-ws https://github.com/z-zawhtet-a/WhisperFusion.git RealtimeWhisper
 
 cd RealtimeWhisper
 apt update
