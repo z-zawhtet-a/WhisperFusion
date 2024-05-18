@@ -24,10 +24,9 @@ if __name__ == "__main__":
         help="Boolean only for TensorRT model. True if multilingual.",
     )
     args = parser.parse_args()
-
-    if args.backend == "tensorrt":
-        if args.trt_model_path is None:
-            raise ValueError("Please Provide a valid tensorrt model path")
+    
+    if args.trt_model_path is None:
+        raise ValueError("Please Provide a valid tensorrt model path")
 
     server = TranscriptionServer()
     server.run(
