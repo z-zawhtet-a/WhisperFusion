@@ -253,8 +253,7 @@ class WhisperTRTLLM(object):
             mel,
             text_prefix="<|startoftranscript|><|th|><|transcribe|><|notimestamps|>",
             num_beams=1):
-        prompt_id = self.tokenizer.encode(
-            text_prefix, allowed_special=set(self.tokenizer.special_tokens.keys()))
+        prompt_id = self.tokenizer.encode(text_prefix)
 
         prompt_id = torch.tensor(prompt_id)
         batch_size = mel.shape[0]

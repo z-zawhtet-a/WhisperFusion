@@ -1,16 +1,16 @@
-import time
-import threading
-import json
 import functools
+import json
 import logging
-import torch
+import threading
+import time
+
 import numpy as np
-from websockets.sync.server import serve
+import torch
 from websockets.exceptions import ConnectionClosed
-from whisper_live.vad import VoiceActivityDetector
+from websockets.sync.server import serve
 
 from whisper_live.transcriber_tensorrt import WhisperTRTLLM
-
+from whisper_live.vad import VoiceActivityDetector
 
 logging.basicConfig(level=logging.INFO)
 
@@ -143,6 +143,7 @@ class TranscriptionServer:
                 model=whisper_tensorrt_path,
             )
             logging.info("Running TensorRT backend.")
+            self.client_manager.add_client(websocket, client)
         except Exception as e:
             logging.error(f"TensorRT-LLM not supported: {e}")
             self.client_uid = options["uid"]
@@ -155,8 +156,6 @@ class TranscriptionServer:
                     }
                 )
             )
-
-        self.client_manager.add_client(websocket, client)
 
     def get_audio_from_websocket(self, websocket):
         """
