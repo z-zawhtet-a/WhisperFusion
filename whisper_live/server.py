@@ -1,3 +1,4 @@
+import os
 import functools
 import json
 import logging
@@ -16,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 class ClientManager:
-    def __init__(self, max_clients=4, max_connection_time=600):
+    def __init__(self, max_clients=4, max_connection_time=3600):
         """
         Initializes the ClientManager with specified limits on client connections and connection durations.
 
@@ -157,6 +158,19 @@ class TranscriptionServer:
                 )
             )
 
+    def authenticate(self, api_key):
+        """
+        Authenticate the client using the provided API key.
+
+        Args:
+            api_key (str): The API key provided by the client.
+
+        Returns:
+            bool: True if the API key is valid, False otherwise.
+        """
+        valid_api_keys = os.getenv("VALID_API_KEYS", "").split(",")
+        return api_key in valid_api_keys
+
     def get_audio_from_websocket(self, websocket):
         """
         Receives audio buffer from websocket and creates a numpy array out of it.
@@ -174,9 +188,18 @@ class TranscriptionServer:
 
     def handle_new_connection(self, websocket, whisper_tensorrt_path, trt_multilingual):
         try:
+            initial_message = websocket.recv()
+            options = json.loads(initial_message)
+
+            api_key = options.get("api_key")
+            if not self.authenticate(api_key):
+                websocket.send(json.dumps({"error": "Invalid API key"}))
+                websocket.close()
+                return False
+
             logging.info("New client connected")
-            options = websocket.recv()
-            options = json.loads(options)
+            # options = websocket.recv()
+            # options = json.loads(options)
             self.use_vad = options.get("use_vad")
             if self.client_manager.is_server_full(websocket, options):
                 websocket.close()
@@ -460,7 +483,7 @@ class ServeClientBase(object):
         """
         return input_bytes.shape[0] / self.RATE
 
-    def send_transcription_to_client(self, segments):
+    def send_transcription_to_client(self, segments, eos=False):
         """
         Sends the specified transcription segments to the client over the websocket connection.
 
@@ -469,6 +492,7 @@ class ServeClientBase(object):
 
         Returns:
             segments (list): A list of transcription segments to be sent to the client.
+            eos (bool): A flag indicating whether the transcription is complete (End of Speech).
         """
         try:
             self.websocket.send(
@@ -476,6 +500,7 @@ class ServeClientBase(object):
                     {
                         "uid": self.client_uid,
                         "segments": segments,
+                        "eos": eos,
                     }
                 )
             )
@@ -593,7 +618,7 @@ class ServeClientTensorRT(ServeClientBase):
             duration (float): Duration of the transcribed audio chunk.
         """
         segments = self.prepare_segments({"text": last_segment})
-        self.send_transcription_to_client(segments)
+        self.send_transcription_to_client(segments, self.eos)
         if self.eos:
             self.update_timestamp_offset(last_segment, duration)
 
