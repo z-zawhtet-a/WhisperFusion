@@ -7,21 +7,15 @@ if __name__ == "__main__":
         "--port",
         "-p",
         type=int,
-        default=8080,
+        default=8081,
         help="Websocket port to run the server on.",
     )
     parser.add_argument(
-        "--trt_model_path",
-        "-trt",
+        "--model_path",
+        "-m",
         type=str,
         default=None,
-        help="Whisper TensorRT model path",
-    )
-    parser.add_argument(
-        "--trt_multilingual",
-        "-m",
-        action="store_true",
-        help="Boolean only for TensorRT model. True if multilingual.",
+        help="Whisper model path",
     )
     args = parser.parse_args()
     
@@ -32,6 +26,5 @@ if __name__ == "__main__":
     server.run(
         "0.0.0.0",
         port=args.port,
-        whisper_tensorrt_path=args.trt_model_path,
-        trt_multilingual=args.trt_multilingual,
+        faster_whisper_custom_model_path=args.model_path,
     )
