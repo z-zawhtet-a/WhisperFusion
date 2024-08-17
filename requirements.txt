@@ -1,6 +1,6 @@
 websockets
-onnxruntime==1.17.3
-onnxruntime-gpu --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+onnxruntime==1.19.0
+onnxruntime-gpu==1.19.0 --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
 tokenizers
 numba
 kaldialign

@@ -130,6 +130,7 @@ class TranscriptionServer:
         self.client_manager = ClientManager()
         self.no_voice_activity_chunks = 0
         self.use_vad = True
+        self.single_model = False
 
     def initialize_client(
         self, websocket, options, whisper_tensorrt_path, trt_multilingual
@@ -142,6 +143,7 @@ class TranscriptionServer:
                 task=options["task"],
                 client_uid=options["uid"],
                 model=whisper_tensorrt_path,
+                single_model=self.single_model,
             )
             logging.info("Running TensorRT backend.")
             self.client_manager.add_client(websocket, client)
@@ -279,14 +281,24 @@ class TranscriptionServer:
                 websocket.close()
             del websocket
 
-    def run(self, host, port=9090, whisper_tensorrt_path=None, trt_multilingual=False):
+    def run(self, host, port=9090, whisper_tensorrt_path=None, trt_multilingual=False, single_model=False):
         """
         Run the transcription server.
 
         Args:
             host (str): The host address to bind the server.
             port (int): The port number to bind the server.
+            whisper_tensorrt_path (str): Required for tensorrt backend.
+            trt_multilingual(bool): Only used for tensorrt, True if multilingual model.
+            single_model (bool): Only used for tensorrt, True if single model.
         """
+        if single_model:
+            if whisper_tensorrt_path:
+                logging.info("Custom model option was provided. Switching to single model mode.")
+                self.single_model = True
+            else:
+                logging.info("Single model mode currently only works with custom models.")
+
         with serve(
             functools.partial(
                 self.recv_audio,
@@ -533,6 +545,10 @@ class ServeClientBase(object):
 
 
 class ServeClientTensorRT(ServeClientBase):
+
+    SINGLE_MODEL = None
+    SINGLE_MODEL_LOCK = threading.Lock()
+
     def __init__(
         self,
         websocket,
@@ -541,6 +557,7 @@ class ServeClientTensorRT(ServeClientBase):
         language=None,
         client_uid=None,
         model=None,
+        single_model=False,
     ):
         """
         Initialize a ServeClient instance.
@@ -555,21 +572,21 @@ class ServeClientTensorRT(ServeClientBase):
             multilingual (bool, optional): Whether the client supports multilingual transcription. Defaults to False.
             language (str, optional): The language for transcription. Defaults to None.
             client_uid (str, optional): A unique identifier for the client. Defaults to None.
-
+            single_model (bool, optional): Whether to instantiate a new model for each client connection. Defaults to False.
         """
         super().__init__(client_uid, websocket)
         self.language = language if multilingual else "en"
         self.task = task
         self.eos = False
-        self.transcriber = WhisperTRTLLM(
-            model,
-            assets_dir="assets",
-            device="cuda",
-            is_multilingual=multilingual,
-            language=self.language,
-            task=self.task,
-        )
-        self.warmup()
+
+        if single_model:
+            if ServeClientTensorRT.SINGLE_MODEL is None:
+                self.create_model(model, multilingual)
+                ServeClientTensorRT.SINGLE_MODEL = self.transcriber
+            else:
+                self.transcriber = ServeClientTensorRT.SINGLE_MODEL
+        else:
+            self.create_model(model, multilingual)
 
         # threading
         self.trans_thread = threading.Thread(target=self.speech_to_text)
@@ -584,6 +601,21 @@ class ServeClientTensorRT(ServeClientBase):
                 }
             )
         )
+
+    def create_model(self, model, multilingual, warmup=True):
+        """
+        Instantiates a new model, sets it as the transcriber and does warmup if desired.
+        """
+        self.transcriber = WhisperTRTLLM(
+            model,
+            assets_dir="assets",
+            device="cuda",
+            is_multilingual=multilingual,
+            language=self.language,
+            task=self.task
+        )
+        if warmup:
+            self.warmup()
 
     def warmup(self, warmup_steps=10):
         """
@@ -629,16 +661,19 @@ class ServeClientTensorRT(ServeClientBase):
         Args:
             input_bytes (np.array): The audio chunk to transcribe.
         """
-        logging.info(
-            f"[WhisperTensorRT:] Processing audio with duration: {input_bytes.shape[0] / self.RATE}"
-        )
+        if ServeClientTensorRT.SINGLE_MODEL:
+            ServeClientTensorRT.SINGLE_MODEL_LOCK.acquire()
+        logging.info(f"[WhisperTensorRT:] Processing audio with duration: {input_bytes.shape[0] / self.RATE}")
         mel, duration = self.transcriber.log_mel_spectrogram(input_bytes)
         last_segment = self.transcriber.transcribe(
             mel,
-            text_prefix=f"<|startoftranscript|><|{self.language}|><|{self.task}|><|notimestamps|>",
+            text_prefix=f"<|startoftranscript|><|{self.language}|><|{self.task}|><|notimestamps|>"
         )
+        if ServeClientTensorRT.SINGLE_MODEL:
+            ServeClientTensorRT.SINGLE_MODEL_LOCK.release()
         if last_segment:
             self.handle_transcription_output(last_segment, duration)
+
 
     def update_timestamp_offset(self, last_segment, duration):
         """

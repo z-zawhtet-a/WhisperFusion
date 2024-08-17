@@ -4,19 +4,19 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Union
 
-import torch
 import numpy as np
-import torch.nn.functional as F
-from whisper_live.tokenizer import get_tokenizer
-from whisper_live.tensorrt_utils import (mel_filters, load_audio_wav_format, pad_or_trim, load_audio)
-
 import tensorrt_llm
 import tensorrt_llm.logger as logger
+import torch
+import torch.nn.functional as F
 from tensorrt_llm._utils import (str_dtype_to_torch, str_dtype_to_trt,
                                  trt_dtype_to_torch)
 from tensorrt_llm.runtime import ModelConfig, SamplingConfig
 from tensorrt_llm.runtime.session import Session, TensorInfo
 
+from whisper_live.tensorrt_utils import (load_audio, load_audio_wav_format,
+                                         mel_filters, pad_or_trim)
+from whisper_live.tokenizer import get_tokenizer
 
 SAMPLE_RATE = 16000
 N_FFT = 400
@@ -29,51 +29,50 @@ class WhisperEncoding:
 
     def __init__(self, engine_dir):
         self.session = self.get_session(engine_dir)
+        config_path = engine_dir / "encoder" / "config.json"
+        with open(config_path, "r") as f:
+            config = json.load(f)
+        self.n_mels = config["pretrained_config"]["n_mels"]
+        self.dtype = config["pretrained_config"]["dtype"]
+        self.num_languages = config["pretrained_config"]["num_languages"]
 
     def get_session(self, engine_dir):
-        config_path = engine_dir / 'encoder_config.json'
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-
-        dtype = config['builder_config']['precision']
-        n_mels = config['builder_config']['n_mels']
-        num_languages = config['builder_config']['num_languages']
-
-        self.dtype = dtype
-        self.n_mels = n_mels
-        self.num_languages = num_languages
-
-        serialize_path = engine_dir / f'whisper_encoder_{self.dtype}_tp1_rank0.engine'
-
-        with open(serialize_path, 'rb') as f:
+        serialize_path = engine_dir / "encoder" / "rank0.engine"
+        with open(serialize_path, "rb") as f:
             session = Session.from_serialized_engine(f.read())
-
         return session
 
     def get_audio_features(self, mel):
-        inputs = OrderedDict()
-        output_list = []
 
-        inputs.update({'x': mel})
-        output_list.append(
-            TensorInfo('x', str_dtype_to_trt(self.dtype), mel.shape))
+        input_lengths = torch.tensor(
+            [mel.shape[2] // 2 for _ in range(mel.shape[0])],
+            dtype=torch.int32,
+            device=mel.device,
+        )
+
+        inputs = OrderedDict()
+        inputs["x"] = mel
+        inputs["input_lengths"] = input_lengths
+
+        output_list = [
+            TensorInfo("x", str_dtype_to_trt(self.dtype), mel.shape),
+            TensorInfo("input_lengths", str_dtype_to_trt("int32"), input_lengths.shape),
+        ]
 
         output_info = (self.session).infer_shapes(output_list)
 
-        logger.debug(f'output info {output_info}')
+        logger.debug(f"output info {output_info}")
         outputs = {
-            t.name: torch.empty(tuple(t.shape),
-                                dtype=trt_dtype_to_torch(t.dtype),
-                                device='cuda')
+            t.name: torch.empty(
+                tuple(t.shape), dtype=trt_dtype_to_torch(t.dtype), device="cuda"
+            )
             for t in output_info
         }
         stream = torch.cuda.current_stream()
-        ok = self.session.run(inputs=inputs,
-                              outputs=outputs,
-                              stream=stream.cuda_stream)
-        assert ok, 'Engine execution failed'
+        ok = self.session.run(inputs=inputs, outputs=outputs, stream=stream.cuda_stream)
+        assert ok, "Engine execution failed"
         stream.synchronize()
-        audio_features = outputs['output']
+        audio_features = outputs["output"]
         return audio_features
 
 
@@ -83,74 +82,82 @@ class WhisperDecoding:
 
         self.decoder_config = self.get_config(engine_dir)
         self.decoder_generation_session = self.get_session(
-            engine_dir, runtime_mapping, debug_mode)
+            engine_dir, runtime_mapping, debug_mode
+        )
 
     def get_config(self, engine_dir):
-        config_path = engine_dir / 'decoder_config.json'
-        with open(config_path, 'r') as f:
+        config_path = engine_dir / "decoder" / "config.json"
+        with open(config_path, "r") as f:
             config = json.load(f)
         decoder_config = OrderedDict()
-        decoder_config.update(config['plugin_config'])
-        decoder_config.update(config['builder_config'])
+        decoder_config.update(config["pretrained_config"])
+        decoder_config.update(config["build_config"])
         return decoder_config
 
     def get_session(self, engine_dir, runtime_mapping, debug_mode=False):
-        dtype = self.decoder_config['precision']
-        serialize_path = engine_dir / f'whisper_decoder_{dtype}_tp1_rank0.engine'
+        serialize_path = engine_dir / "decoder" / "rank0.engine"
         with open(serialize_path, "rb") as f:
             decoder_engine_buffer = f.read()
 
         decoder_model_config = ModelConfig(
-            num_heads=self.decoder_config['num_heads'],
-            num_kv_heads=self.decoder_config['num_heads'],
-            hidden_size=self.decoder_config['hidden_size'],
-            vocab_size=self.decoder_config['vocab_size'],
-            num_layers=self.decoder_config['num_layers'],
-            gpt_attention_plugin=self.decoder_config['gpt_attention_plugin'],
-            remove_input_padding=self.decoder_config['remove_input_padding'],
-            cross_attention=self.decoder_config['cross_attention'],
-            has_position_embedding=self.
-            decoder_config['has_position_embedding'],
-            has_token_type_embedding=self.
-            decoder_config['has_token_type_embedding'],
+            max_batch_size=self.decoder_config["max_batch_size"],
+            max_beam_width=self.decoder_config["max_beam_width"],
+            num_heads=self.decoder_config["num_attention_heads"],
+            num_kv_heads=self.decoder_config["num_attention_heads"],
+            hidden_size=self.decoder_config["hidden_size"],
+            vocab_size=self.decoder_config["vocab_size"],
+            cross_attention=True,
+            num_layers=self.decoder_config["num_hidden_layers"],
+            gpt_attention_plugin=self.decoder_config["plugin_config"][
+                "gpt_attention_plugin"
+            ],
+            remove_input_padding=self.decoder_config["plugin_config"][
+                "remove_input_padding"
+            ],
+            has_position_embedding=self.decoder_config["has_position_embedding"],
+            has_token_type_embedding=False,
         )
         decoder_generation_session = tensorrt_llm.runtime.GenerationSession(
             decoder_model_config,
             decoder_engine_buffer,
             runtime_mapping,
-            debug_mode=debug_mode)
+            debug_mode=debug_mode,
+        )
 
         return decoder_generation_session
 
-    def generate(self,
-                 decoder_input_ids,
-                 encoder_outputs,
-                 eot_id,
-                 max_new_tokens=40,
-                 num_beams=1):
+    def generate(
+        self, decoder_input_ids, encoder_outputs, eot_id, max_new_tokens=40, num_beams=1
+    ):
         encoder_input_lengths = torch.tensor(
             [encoder_outputs.shape[1] for x in range(encoder_outputs.shape[0])],
             dtype=torch.int32,
-            device='cuda')
-
-        decoder_input_lengths = torch.tensor([
-            decoder_input_ids.shape[-1]
-            for _ in range(decoder_input_ids.shape[0])
-        ],
-                                             dtype=torch.int32,
-                                             device='cuda')
+            device="cuda",
+        )
+        decoder_input_lengths = torch.tensor(
+            [decoder_input_ids.shape[-1] for _ in range(decoder_input_ids.shape[0])],
+            dtype=torch.int32,
+            device="cuda",
+        )
         decoder_max_input_length = torch.max(decoder_input_lengths).item()
 
+        cross_attention_mask = (
+            torch.ones([encoder_outputs.shape[0], 1, encoder_outputs.shape[1]])
+            .int()
+            .cuda()
+        )
+
         # generation config
-        sampling_config = SamplingConfig(end_id=eot_id,
-                                         pad_id=eot_id,
-                                         num_beams=num_beams)
+        sampling_config = SamplingConfig(
+            end_id=eot_id, pad_id=eot_id, num_beams=num_beams
+        )
         self.decoder_generation_session.setup(
             decoder_input_lengths.size(0),
             decoder_max_input_length,
             max_new_tokens,
             beam_width=num_beams,
-            encoder_max_input_length=encoder_outputs.shape[1])
+            encoder_max_input_length=encoder_outputs.shape[1],
+        )
 
         torch.cuda.synchronize()
 
@@ -161,6 +168,7 @@ class WhisperDecoding:
             sampling_config,
             encoder_output=encoder_outputs,
             encoder_input_lengths=encoder_input_lengths,
+            cross_attention_mask=cross_attention_mask,
         )
         torch.cuda.synchronize()
 
@@ -171,8 +179,17 @@ class WhisperDecoding:
 
 class WhisperTRTLLM(object):
 
-    def __init__(self, engine_dir, assets_dir=None, device=None, is_multilingual=False,
-                 language="en", task="transcribe"):
+    def __init__(
+        self,
+        engine_dir,
+        assets_dir=None,
+        device=None,
+        is_multilingual=False,
+        language="th",
+        task="transcribe",
+    ):
+        self.language = language
+        self.task = task
         world_size = 1
         runtime_rank = tensorrt_llm.mpi_rank()
         runtime_mapping = tensorrt_llm.Mapping(world_size, runtime_rank)
@@ -180,9 +197,7 @@ class WhisperTRTLLM(object):
         engine_dir = Path(engine_dir)
 
         self.encoder = WhisperEncoding(engine_dir)
-        self.decoder = WhisperDecoding(engine_dir,
-                                       runtime_mapping,
-                                       debug_mode=False)
+        self.decoder = WhisperDecoding(engine_dir, runtime_mapping, debug_mode=False)
         self.n_mels = self.encoder.n_mels
         self.device = device
         self.tokenizer = get_tokenizer(
@@ -194,7 +209,7 @@ class WhisperTRTLLM(object):
         self,
         audio: Union[str, np.ndarray, torch.Tensor],
         padding: int = 0,
-        return_duration=True
+        return_duration=True,
     ):
         """
         Compute the log-Mel spectrogram of
@@ -220,11 +235,13 @@ class WhisperTRTLLM(object):
         """
         if not torch.is_tensor(audio):
             if isinstance(audio, str):
-                if audio.endswith('.wav'):
+                if audio.endswith(".wav"):
                     audio, _ = load_audio_wav_format(audio)
                 else:
                     audio = load_audio(audio)
-            assert isinstance(audio, np.ndarray), f"Unsupported audio type: {type(audio)}"
+            assert isinstance(
+                audio, np.ndarray
+            ), f"Unsupported audio type: {type(audio)}"
             duration = audio.shape[-1] / SAMPLE_RATE
             audio = pad_or_trim(audio, N_SAMPLES)
             audio = audio.astype(np.float32)
@@ -236,7 +253,7 @@ class WhisperTRTLLM(object):
             audio = F.pad(audio, (0, padding))
         window = torch.hann_window(N_FFT).to(audio.device)
         stft = torch.stft(audio, N_FFT, HOP_LENGTH, window=window, return_complex=True)
-        magnitudes = stft[..., :-1].abs()**2
+        magnitudes = stft[..., :-1].abs() ** 2
 
         mel_spec = self.filters @ magnitudes
 
@@ -249,10 +266,14 @@ class WhisperTRTLLM(object):
             return log_spec
 
     def process_batch(
-            self,
-            mel,
-            text_prefix="<|startoftranscript|><|th|><|transcribe|><|notimestamps|>",
-            num_beams=1):
+        self,
+        mel,
+        text_prefix=None,
+        num_beams=1,
+    ):
+        if text_prefix is None:
+            text_prefix = f"<|startoftranscript|><|{self.language}|><|{self.task}|><|notimestamps|>"
+
         prompt_id = self.tokenizer.encode(text_prefix)
 
         prompt_id = torch.tensor(prompt_id)
@@ -260,11 +281,13 @@ class WhisperTRTLLM(object):
         decoder_input_ids = prompt_id.repeat(batch_size, 1)
 
         encoder_output = self.encoder.get_audio_features(mel)
-        output_ids = self.decoder.generate(decoder_input_ids,
-                                           encoder_output,
-                                           self.tokenizer.eot,
-                                           max_new_tokens=96,
-                                           num_beams=num_beams)
+        output_ids = self.decoder.generate(
+            decoder_input_ids,
+            encoder_output,
+            self.tokenizer.eot,
+            max_new_tokens=96,
+            num_beams=num_beams,
+        )
         texts = []
         for i in range(len(output_ids)):
             text = self.tokenizer.decode(output_ids[i][0]).strip()
@@ -272,43 +295,20 @@ class WhisperTRTLLM(object):
         return texts
 
     def transcribe(
-            self,
-            mel,
-            text_prefix="<|startoftranscript|><|th|><|transcribe|><|notimestamps|>",
-            dtype='float16',
-            batch_size=1,
-            num_beams=1,
-            ):
+        self,
+        mel,
+        text_prefix=None,
+        dtype="float16",
+        batch_size=1,
+        num_beams=1,
+    ):
+        if text_prefix is None:
+            text_prefix = f"<|startoftranscript|><|{self.language}|><|{self.task}|><|notimestamps|>"
         mel = mel.type(str_dtype_to_torch(dtype))
         mel = mel.unsqueeze(0)
         predictions = self.process_batch(mel, text_prefix, num_beams)
         prediction = predictions[0]
 
         # remove all special tokens in the prediction
-        prediction = re.sub(r'<\|.*?\|>', '', prediction)
+        prediction = re.sub(r"<\|.*?\|>", "", prediction)
         return prediction.strip()
-
-
-def decode_wav_file(
-        model,
-        mel,
-        text_prefix="<|startoftranscript|><|th|><|transcribe|><|notimestamps|>",
-        dtype='float16',
-        batch_size=1,
-        num_beams=1,
-        normalizer=None,
-        mel_filters_dir=None):
-
-    mel = mel.type(str_dtype_to_torch(dtype))
-    mel = mel.unsqueeze(0)
-    # repeat the mel spectrogram to match the batch size
-    mel = mel.repeat(batch_size, 1, 1)
-    predictions = model.process_batch(mel, text_prefix, num_beams)
-    prediction = predictions[0]
-
-    # remove all special tokens in the prediction
-    prediction = re.sub(r'<\|.*?\|>', '', prediction)
-    if normalizer:
-        prediction = normalizer(prediction)
-
-    return prediction.strip()
