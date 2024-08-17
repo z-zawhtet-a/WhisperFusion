@@ -1,12 +1,14 @@
-import os
+import base64
 import functools
 import json
 import logging
+import os
 import threading
 import time
 
 import numpy as np
 import torch
+import torchaudio
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.server import serve
 
@@ -133,7 +135,7 @@ class TranscriptionServer:
         self.single_model = False
 
     def initialize_client(
-        self, websocket, options, whisper_tensorrt_path, trt_multilingual
+        self, websocket, options, whisper_tensorrt_path, trt_multilingual, encoding
     ):
         try:
             client = ServeClientTensorRT(
@@ -144,6 +146,7 @@ class TranscriptionServer:
                 client_uid=options["uid"],
                 model=whisper_tensorrt_path,
                 single_model=self.single_model,
+                encoding=encoding,
             )
             logging.info("Running TensorRT backend.")
             self.client_manager.add_client(websocket, client)
@@ -203,13 +206,17 @@ class TranscriptionServer:
             # options = websocket.recv()
             # options = json.loads(options)
             self.use_vad = options.get("use_vad")
+            encoding = options.get(
+                "encoding", "linear16"
+            )  # Default to linear16 if not specified
+
             if self.client_manager.is_server_full(websocket, options):
                 websocket.close()
                 return False  # Indicates that the connection should not continue
 
             self.vad_detector = VoiceActivityDetector(frame_rate=self.RATE)
             self.initialize_client(
-                websocket, options, whisper_tensorrt_path, trt_multilingual
+                websocket, options, whisper_tensorrt_path, trt_multilingual, encoding
             )
             return True
         except json.JSONDecodeError:
@@ -281,7 +288,14 @@ class TranscriptionServer:
                 websocket.close()
             del websocket
 
-    def run(self, host, port=9090, whisper_tensorrt_path=None, trt_multilingual=False, single_model=False):
+    def run(
+        self,
+        host,
+        port=9090,
+        whisper_tensorrt_path=None,
+        trt_multilingual=False,
+        single_model=False,
+    ):
         """
         Run the transcription server.
 
@@ -294,10 +308,14 @@ class TranscriptionServer:
         """
         if single_model:
             if whisper_tensorrt_path:
-                logging.info("Custom model option was provided. Switching to single model mode.")
+                logging.info(
+                    "Custom model option was provided. Switching to single model mode."
+                )
                 self.single_model = True
             else:
-                logging.info("Single model mode currently only works with custom models.")
+                logging.info(
+                    "Single model mode currently only works with custom models."
+                )
 
         with serve(
             functools.partial(
@@ -558,6 +576,7 @@ class ServeClientTensorRT(ServeClientBase):
         client_uid=None,
         model=None,
         single_model=False,
+        encoding="linear16",
     ):
         """
         Initialize a ServeClient instance.
@@ -578,6 +597,9 @@ class ServeClientTensorRT(ServeClientBase):
         self.language = language if multilingual else "en"
         self.task = task
         self.eos = False
+        self.encoding = encoding
+        self.mulaw_decoder = torchaudio.transforms.MuLawDecoding()
+        self.resampler = torchaudio.transforms.Resample(orig_freq=8000, new_freq=16000)
 
         if single_model:
             if ServeClientTensorRT.SINGLE_MODEL is None:
@@ -602,6 +624,50 @@ class ServeClientTensorRT(ServeClientBase):
             )
         )
 
+    def decode_audio(self, audio_data):
+        """
+        Decodes audio data based on the encoding type.
+        """
+        if self.encoding == "mulaw":
+            # Decode mu-law using torchaudio
+            audio = np.frombuffer(audio_data, dtype=np.uint8)
+            audio_tensor = torch.from_numpy(audio).float()
+            decoded_tensor = self.mulaw_decoder(audio_tensor)
+        elif self.encoding == "linear16":
+            # Decode linear PCM
+            audio = np.frombuffer(audio_data, dtype=np.int16)
+            decoded_tensor = torch.from_numpy(audio).float() / 32768.0
+        else:
+            raise ValueError(f"Unsupported encoding: {self.encoding}")
+
+        # Resample to 16 kHz
+        resampled_tensor = self.resampler(decoded_tensor.unsqueeze(0)).squeeze(0)
+
+        return resampled_tensor.numpy()
+
+    def get_audio_from_websocket(self):
+        """
+        Receives audio buffer from websocket, decodes it from base64, and then decodes the audio format.
+        """
+        try:
+            message = self.websocket.recv()
+            data = json.loads(message)
+            audio_base64 = data.get("audio")
+            if not audio_base64:
+                return False
+
+            audio_data = base64.b64decode(audio_base64)
+            return self.decode_audio(audio_data)
+        except json.JSONDecodeError:
+            logging.error("Failed to decode JSON from client")
+            return False
+        except ConnectionClosed:
+            logging.info("Connection closed by client")
+            return False
+        except Exception as e:
+            logging.error(f"Error receiving audio from websocket: {str(e)}")
+            return False
+
     def create_model(self, model, multilingual, warmup=True):
         """
         Instantiates a new model, sets it as the transcriber and does warmup if desired.
@@ -612,7 +678,7 @@ class ServeClientTensorRT(ServeClientBase):
             device="cuda",
             is_multilingual=multilingual,
             language=self.language,
-            task=self.task
+            task=self.task,
         )
         if warmup:
             self.warmup()
@@ -663,17 +729,18 @@ class ServeClientTensorRT(ServeClientBase):
         """
         if ServeClientTensorRT.SINGLE_MODEL:
             ServeClientTensorRT.SINGLE_MODEL_LOCK.acquire()
-        logging.info(f"[WhisperTensorRT:] Processing audio with duration: {input_bytes.shape[0] / self.RATE}")
+        logging.info(
+            f"[WhisperTensorRT:] Processing audio with duration: {input_bytes.shape[0] / self.RATE}"
+        )
         mel, duration = self.transcriber.log_mel_spectrogram(input_bytes)
         last_segment = self.transcriber.transcribe(
             mel,
-            text_prefix=f"<|startoftranscript|><|{self.language}|><|{self.task}|><|notimestamps|>"
+            text_prefix=f"<|startoftranscript|><|{self.language}|><|{self.task}|><|notimestamps|>",
         )
         if ServeClientTensorRT.SINGLE_MODEL:
             ServeClientTensorRT.SINGLE_MODEL_LOCK.release()
         if last_segment:
             self.handle_transcription_output(last_segment, duration)
-
 
     def update_timestamp_offset(self, last_segment, duration):
         """
@@ -710,11 +777,12 @@ class ServeClientTensorRT(ServeClientBase):
             if self.exit:
                 logging.info("Exiting speech to text thread")
                 break
-
-            if self.frames_np is None:
+            frame_np = self.get_audio_from_websocket()
+            if frame_np is False:
                 time.sleep(0.02)  # wait for any audio to arrive
                 continue
 
+            self.add_frames(frame_np)
             self.clip_audio_if_no_valid_segment()
 
             input_bytes, duration = self.get_audio_chunk_for_processing()
