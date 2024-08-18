@@ -3,6 +3,7 @@ import functools
 import json
 import logging
 import os
+import queue
 import threading
 import time
 
@@ -14,6 +15,7 @@ from websockets.sync.server import serve
 
 from whisper_live.transcriber_tensorrt import WhisperTRTLLM
 from whisper_live.vad import VoiceActivityDetector
+from whisper_live.tensorrt_utils import decode_mulaw
 
 logging.basicConfig(level=logging.INFO)
 
@@ -133,6 +135,7 @@ class TranscriptionServer:
         self.no_voice_activity_chunks = 0
         self.use_vad = True
         self.single_model = False
+        self.resampler = torchaudio.transforms.Resample(orig_freq=8000, new_freq=16000)
 
     def initialize_client(
         self, websocket, options, whisper_tensorrt_path, trt_multilingual, encoding
@@ -176,20 +179,48 @@ class TranscriptionServer:
         valid_api_keys = os.getenv("VALID_API_KEYS", "").split(",")
         return api_key in valid_api_keys
 
+    def decode_audio(self, audio_data, encoding):
+        """
+        Decodes audio data based on the encoding type.
+        """
+        if encoding == "mulaw":
+            # Decode mu-law
+            audio = np.frombuffer(audio_data, dtype=np.uint8)
+            decoded_tensor = torch.from_numpy(decode_mulaw(audio)).float()
+        elif encoding == "linear16":
+            # Decode linear PCM
+            audio = np.frombuffer(audio_data, dtype=np.int16)
+            decoded_tensor = torch.from_numpy(audio).float() / 32768.0
+        else:
+            raise ValueError(f"Unsupported encoding: {self.encoding}")
+
+        # Resample to 16 kHz
+        resampled_tensor = self.resampler(decoded_tensor.unsqueeze(0)).squeeze(0)
+
+        return resampled_tensor.numpy()
+
     def get_audio_from_websocket(self, websocket):
         """
-        Receives audio buffer from websocket and creates a numpy array out of it.
-
-        Args:
-            websocket: The websocket to receive audio from.
-
-        Returns:
-            A numpy array containing the audio.
+        Receives audio buffer from websocket, decodes it from base64, and then decodes the audio format.
         """
-        frame_data = websocket.recv()
-        if frame_data == b"END_OF_AUDIO":
+        try:
+            message = websocket.recv()
+            data = json.loads(message)
+            audio_base64 = data.get("audio")
+            if not audio_base64:
+                return False
+
+            audio_data = base64.b64decode(audio_base64)
+            return audio_data
+        except json.JSONDecodeError:
+            logging.error("Failed to decode JSON from client")
             return False
-        return np.frombuffer(frame_data, dtype=np.float32)
+        except ConnectionClosed:
+            logging.info("Connection closed by client")
+            return False
+        except Exception as e:
+            logging.error(f"Error receiving audio from websocket: {str(e)}")
+            return False
 
     def handle_new_connection(self, websocket, whisper_tensorrt_path, trt_multilingual):
         try:
@@ -230,11 +261,14 @@ class TranscriptionServer:
             return False
 
     def process_audio_frames(self, websocket):
-        frame_np = self.get_audio_from_websocket(websocket)
+        audio_data = self.get_audio_from_websocket(websocket)
         client = self.client_manager.get_client(websocket)
-        if frame_np is False:
+
+        if audio_data is False: # Signal end of audio
             client.set_eos(True)
             return False
+
+        frame_np = self.decode_audio(audio_data, client.encoding)
 
         voice_active = self.voice_activity(websocket, frame_np)
         if voice_active:
@@ -598,8 +632,6 @@ class ServeClientTensorRT(ServeClientBase):
         self.task = task
         self.eos = False
         self.encoding = encoding
-        self.mulaw_decoder = torchaudio.transforms.MuLawDecoding()
-        self.resampler = torchaudio.transforms.Resample(orig_freq=8000, new_freq=16000)
 
         if single_model:
             if ServeClientTensorRT.SINGLE_MODEL is None:
@@ -623,50 +655,6 @@ class ServeClientTensorRT(ServeClientBase):
                 }
             )
         )
-
-    def decode_audio(self, audio_data):
-        """
-        Decodes audio data based on the encoding type.
-        """
-        if self.encoding == "mulaw":
-            # Decode mu-law using torchaudio
-            audio = np.frombuffer(audio_data, dtype=np.uint8)
-            audio_tensor = torch.from_numpy(audio).float()
-            decoded_tensor = self.mulaw_decoder(audio_tensor)
-        elif self.encoding == "linear16":
-            # Decode linear PCM
-            audio = np.frombuffer(audio_data, dtype=np.int16)
-            decoded_tensor = torch.from_numpy(audio).float() / 32768.0
-        else:
-            raise ValueError(f"Unsupported encoding: {self.encoding}")
-
-        # Resample to 16 kHz
-        resampled_tensor = self.resampler(decoded_tensor.unsqueeze(0)).squeeze(0)
-
-        return resampled_tensor.numpy()
-
-    def get_audio_from_websocket(self):
-        """
-        Receives audio buffer from websocket, decodes it from base64, and then decodes the audio format.
-        """
-        try:
-            message = self.websocket.recv()
-            data = json.loads(message)
-            audio_base64 = data.get("audio")
-            if not audio_base64:
-                return False
-
-            audio_data = base64.b64decode(audio_base64)
-            return self.decode_audio(audio_data)
-        except json.JSONDecodeError:
-            logging.error("Failed to decode JSON from client")
-            return False
-        except ConnectionClosed:
-            logging.info("Connection closed by client")
-            return False
-        except Exception as e:
-            logging.error(f"Error receiving audio from websocket: {str(e)}")
-            return False
 
     def create_model(self, model, multilingual, warmup=True):
         """
@@ -777,12 +765,11 @@ class ServeClientTensorRT(ServeClientBase):
             if self.exit:
                 logging.info("Exiting speech to text thread")
                 break
-            frame_np = self.get_audio_from_websocket()
-            if frame_np is False:
+
+            if self.frames_np is None:
                 time.sleep(0.02)  # wait for any audio to arrive
                 continue
 
-            self.add_frames(frame_np)
             self.clip_audio_if_no_valid_segment()
 
             input_bytes, duration = self.get_audio_chunk_for_processing()

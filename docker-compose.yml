@@ -12,6 +12,7 @@ services:
         target: /root/scratch-space
     environment:
       VERBOSE: ${VERBOSE:-false}
+      VALID_API_KEYS: ${VALID_API_KEYS:-helloworld}
     ports:
       - "8080:8080"
     deploy:

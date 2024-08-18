@@ -34,6 +34,52 @@ HOP_LENGTH = 160
 CHUNK_LENGTH = 30
 N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE  # 480000 samples in a 30-second chunk
 
+BIAS = 0x84
+CLIP = 32635
+
+encode_table = np.array([
+    0,0,1,1,2,2,2,2,3,3,3,3,3,3,3,3,
+    4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,
+    5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+    5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+    6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+    6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+    6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+    6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+])
+
+decode_table = np.array([0, 132, 396, 924, 1980, 4092, 8316, 16764])
+
+def encode_sample(sample: int) -> int:
+    sign = (sample >> 8) & 0x80
+    if sign != 0:
+        sample = -sample
+    sample = min(sample + BIAS, CLIP)
+    exponent = encode_table[(sample >> 7) & 0xFF]
+    mantissa = (sample >> (exponent + 3)) & 0x0F
+    return ~(sign | (exponent << 4) | mantissa) & 0xFF
+
+def decode_sample(mu_law_sample: int) -> int:
+    mu_law_sample = ~mu_law_sample & 0xFF
+    sign = mu_law_sample & 0x80
+    exponent = (mu_law_sample >> 4) & 0x07
+    mantissa = mu_law_sample & 0x0F
+    sample = decode_table[exponent] + (mantissa << (exponent + 3))
+    return -sample if sign != 0 else sample
+
+def encode_mulaw(samples: np.ndarray) -> np.ndarray:
+    return np.frompyfunc(encode_sample, 1, 1)(samples).astype(np.uint8)
+
+def decode_mulaw(samples: np.ndarray) -> np.ndarray:
+    return np.frompyfunc(decode_sample, 1, 1)(samples).astype(np.int16)
 
 def load_audio(file: str, sr: int = SAMPLE_RATE):
     """
