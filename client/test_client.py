@@ -101,37 +101,61 @@ class WhisperClient:
 
     def stream_audio(self):
         chunk_duration = 0.1  # 100ms chunks
-        with sf.SoundFile(self.wav_file) as audio_file:
-            sample_rate = audio_file.samplerate
-            channels = audio_file.channels
-            chunk_size = int(sample_rate * chunk_duration)
+        # For mulaw, we need to read the audio file in raw chunks of 8kHz μ-law audio
+        if self.encoding == "mulaw":
+            with open(self.wav_file, "rb") as audio_file:
+                while self.is_connected:
+                    chunk = audio_file.read(
+                        int(chunk_duration * 8000)
+                    )  # For 8kHz μ-law audio
+                    if not chunk:
+                        break
+                    self.send_audio(chunk)
+                    # Wait for transcription or timeout
+                    self.transcription_received.wait(timeout=0.5)
+                    self.transcription_received.clear()
 
-            print(
-                f"Audio details: {channels} channels, {sample_rate} Hz, {audio_file.format} format"
-            )
+                    if self.latest_transcription:
+                        segments = self.latest_transcription.get("segments", [])
+                        eos = self.latest_transcription.get("eos", False)
+                        for segment in segments:
+                            print(f"Transcription: {segment['text']}")
+                        if eos:
+                            print("End of speech detected")
 
-            while audio_file.tell() < audio_file.frames and self.is_connected:
-                chunk = audio_file.read(chunk_size, dtype="int16")
-                if len(chunk) == 0:
-                    break
+                    time.sleep(chunk_duration)
+        else:
+            with sf.SoundFile(self.wav_file) as audio_file:
+                sample_rate = audio_file.samplerate
+                channels = audio_file.channels
+                chunk_size = int(sample_rate * chunk_duration)
 
-                chunk_bytes = chunk.tobytes()
-                self.send_audio(chunk_bytes)
+                print(
+                    f"Audio details: {channels} channels, {sample_rate} Hz, {audio_file.format} format"
+                )
 
-                # Wait for transcription or timeout
-                self.transcription_received.wait(timeout=0.5)
-                self.transcription_received.clear()
+                while audio_file.tell() < audio_file.frames and self.is_connected:
+                    chunk = audio_file.read(chunk_size, dtype="int16")
+                    if len(chunk) == 0:
+                        break
 
-                if self.latest_transcription:
-                    segments = self.latest_transcription.get("segments", [])
-                    eos = self.latest_transcription.get("eos", False)
-                    for segment in segments:
-                        print(f"Transcription: {segment['text']}")
-                    if eos:
-                        print("End of speech detected")
+                    chunk_bytes = chunk.tobytes()
+                    self.send_audio(chunk_bytes)
 
-                # Simulate real-time streaming
-                time.sleep(chunk_duration)
+                    # Wait for transcription or timeout
+                    self.transcription_received.wait(timeout=0.5)
+                    self.transcription_received.clear()
+
+                    if self.latest_transcription:
+                        segments = self.latest_transcription.get("segments", [])
+                        eos = self.latest_transcription.get("eos", False)
+                        for segment in segments:
+                            print(f"Transcription: {segment['text']}")
+                        if eos:
+                            print("End of speech detected")
+
+                    # Simulate real-time streaming
+                    time.sleep(chunk_duration)
 
         print("Finished streaming audio")
         self.client_socket.close()
@@ -144,7 +168,7 @@ def main():
         "helloworld",
         "test_mulaw.wav",
         language="en",
-        encoding="linear16",
+        encoding="mulaw",
     )
     client.connect()
 

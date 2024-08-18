@@ -2,4 +2,5 @@
 .DS_Store
 __pycache__/
 docker/scratch-space/models
+docker/scratch-space/saved_audios
 .env

@@ -1,11 +1,12 @@
 import base64
+from datetime import datetime
 import functools
 import json
 import logging
 import os
-import queue
 import threading
 import time
+import wave
 
 import numpy as np
 import torch
@@ -185,8 +186,7 @@ class TranscriptionServer:
         """
         if encoding == "mulaw":
             # Decode mu-law
-            audio = np.frombuffer(audio_data, dtype=np.uint8)
-            decoded_tensor = torch.from_numpy(decode_mulaw(audio)).float()
+            decoded_tensor = torch.from_numpy(decode_mulaw(audio_data)).float() / 32768.0
         elif encoding == "linear16":
             # Decode linear PCM
             audio = np.frombuffer(audio_data, dtype=np.int16)
@@ -655,6 +655,27 @@ class ServeClientTensorRT(ServeClientBase):
                 }
             )
         )
+
+        self.audio_save_dir = "/root/scratch-space/saved_audios"
+        os.makedirs(self.audio_save_dir, exist_ok=True)
+
+    def save_audio_buffer(self):
+        """
+        Saves the current audio buffer as a WAV file.
+        """
+        if self.frames_np is None or len(self.frames_np) == 0:
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self.audio_save_dir}/audio_{self.client_uid}_{timestamp}.wav"
+
+        with wave.open(filename, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 2 bytes for 'int16' dtype
+            wf.setframerate(self.RATE)
+            wf.writeframes((self.frames_np * 32767).astype(np.int16).tobytes())
+
+        logging.info(f"Saved audio buffer to {filename}")
 
     def create_model(self, model, multilingual, warmup=True):
         """
